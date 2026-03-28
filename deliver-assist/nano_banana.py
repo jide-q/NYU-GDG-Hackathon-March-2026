@@ -178,9 +178,17 @@ def _generate_veo_video(client: genai.Client, prompt: str) -> str | None:
         return None
 
     video = operation.response.generated_videos[0].video
-    uri = getattr(video, "uri", None)
-    logger.info("[Veo] Done — uri: %s", str(uri)[:80] if uri else "none")
-    return uri
+    logger.info("[Veo] Done — downloading via SDK")
+
+    # Download video bytes using the SDK (handles API key auth internally).
+    try:
+        video_bytes = client.files.download(file=video)
+        b64 = base64.b64encode(video_bytes).decode()
+        logger.info("[Veo] Downloaded %d bytes → data URL", len(video_bytes))
+        return f"data:video/mp4;base64,{b64}"
+    except Exception as e:
+        logger.warning("[Veo] SDK download failed (%s)", e)
+        return None
 
 
 def _extract_inline(response, default_mime: str) -> tuple[str | None, str | None]:
@@ -238,36 +246,12 @@ def generate_video(client: genai.Client, prompt: str) -> dict:
     except Exception as e:
         logger.warning("[Veo] Failed (%s), falling back to image+audio", e)
 
-    # ── Fallback: image (nano-banana) + audio (lyria) ───────────────────────
-    logger.info("[Fallback] Generating image + audio")
-    image_url = image_mime = audio_url = None
-
-    try:
-        img_resp = client.models.generate_content(
-            model=IMAGE_MODEL, contents=prompt,
-        )
-        image_url, image_mime = _extract_inline(img_resp, "image/jpeg")
-        logger.info("[Image] %s", "ok" if image_url else "no data")
-    except Exception as e:
-        logger.warning("[Image] Failed: %s", e)
-
-    audio_prompt = (
-        "Upbeat, warm, informative background music for a short explainer video "
-        "about worker rights and fair pay. Positive, empowering tone. No lyrics."
-    )
-    try:
-        aud_resp = client.models.generate_content(
-            model=AUDIO_MODEL, contents=audio_prompt,
-        )
-        audio_url, _ = _extract_inline(aud_resp, "audio/mpeg")
-        logger.info("[Audio] %s", "ok" if audio_url else "no data")
-    except Exception as e:
-        logger.warning("[Audio] Failed: %s", e)
-
+    # Veo failed — return empty so the frontend shows the script card
+    logger.warning("[Veo] Failed, frontend will show script card fallback")
     return {
         "video_url": None,
-        "image_url": image_url,
-        "audio_url": audio_url,
-        "media_type": image_mime,
+        "image_url": None,
+        "audio_url": None,
+        "media_type": None,
         "status": "success",
     }

@@ -723,18 +723,19 @@ function showMediaCard(result, scriptPayload) {
         video.style.cssText = 'width:100%;border-radius:10px;margin:6px 0;display:block;';
         video.onerror = () => {
             video.remove();
-            // If browser can't play inline, offer download
-            const dlBtn = document.createElement('button');
-            dlBtn.className = 'interaction-option';
-            dlBtn.textContent = '⬇ Download video';
-            dlBtn.onclick = () => {
-                const a = document.createElement('a');
-                a.href = result.video_url;
-                a.download = 'explainer.mp4';
-                a.target = '_blank';
-                a.click();
-            };
-            card.insertBefore(dlBtn, card.querySelector('.video-scene'));
+            // Only offer download if it's a safe data URI we own
+            if (result.video_url && result.video_url.startsWith('data:')) {
+                const dlBtn = document.createElement('button');
+                dlBtn.className = 'interaction-option';
+                dlBtn.textContent = '⬇ Download video';
+                dlBtn.onclick = () => {
+                    const a = document.createElement('a');
+                    a.href = result.video_url;
+                    a.download = 'explainer.mp4';
+                    a.click();
+                };
+                card.insertBefore(dlBtn, card.querySelector('.video-scene'));
+            }
             chat.scrollTop = chat.scrollHeight;
         };
         video.src = result.video_url;
