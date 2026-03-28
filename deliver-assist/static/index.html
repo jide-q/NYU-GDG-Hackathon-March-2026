@@ -690,7 +690,8 @@ async function generateVideo() {
 
         loadingCard.remove();
 
-        const hasMedia = videoResult.video_url || videoResult.image_url || videoResult.audio_url;
+        const hasMedia = (videoResult.segments && videoResult.segments.length > 0)
+            || videoResult.video_url || videoResult.image_url || videoResult.audio_url;
         if (hasMedia) {
             showMediaCard(videoResult, scriptPayload);
         } else {
@@ -715,36 +716,104 @@ function showMediaCard(result, scriptPayload) {
     title.textContent = '📹 Explainer';
     card.appendChild(title);
 
-    // ── Veo video ───────────────────────────────────────────────────────────
-    if (result.video_url) {
+    // ── Multi-segment Veo video with sequential playback ────────────────────
+    const segments = result.segments && result.segments.length > 0
+        ? result.segments
+        : (result.video_url ? [result.video_url] : []);
+
+    if (segments.length > 0) {
+        // Progress label: "Part 1 / 2"
+        const partLabel = document.createElement('div');
+        partLabel.style.cssText = 'font-size:12px;color:#6366f1;margin:4px 0;font-weight:600;';
+        const updatePartLabel = (idx) => {
+            partLabel.textContent = segments.length > 1
+                ? `Part ${idx + 1} / ${segments.length}`
+                : '';
+        };
+        updatePartLabel(0);
+        card.appendChild(partLabel);
+
         const video = document.createElement('video');
         video.controls = true;
         video.autoplay = true;
+        video.playsInline = true;
         video.style.cssText = 'width:100%;border-radius:10px;margin:6px 0;display:block;';
+
+        let currentSegIdx = 0;
+
+        const loadSegment = (idx) => {
+            if (idx >= segments.length) return;
+            currentSegIdx = idx;
+            updatePartLabel(idx);
+            video.src = segments[idx];
+            video.load();
+            video.play().catch(() => {});
+        };
+
+        video.addEventListener('ended', () => {
+            if (currentSegIdx + 1 < segments.length) {
+                loadSegment(currentSegIdx + 1);
+            }
+        });
+        // Fallback: poll for ended state (some browsers don't fire 'ended' on data URIs)
+        video.addEventListener('timeupdate', () => {
+            if (video.duration && video.currentTime >= video.duration - 0.2) {
+                if (currentSegIdx + 1 < segments.length) {
+                    loadSegment(currentSegIdx + 1);
+                }
+            }
+        });
+
         video.onerror = () => {
+            // Try next segment on error; if none left, offer download
+            if (currentSegIdx + 1 < segments.length) {
+                loadSegment(currentSegIdx + 1);
+                return;
+            }
             video.remove();
-            // Only offer download if it's a safe data URI we own
-            if (result.video_url && result.video_url.startsWith('data:')) {
+            partLabel.remove();
+            if (segments[0] && segments[0].startsWith('data:')) {
                 const dlBtn = document.createElement('button');
                 dlBtn.className = 'interaction-option';
                 dlBtn.textContent = '⬇ Download video';
                 dlBtn.onclick = () => {
-                    const a = document.createElement('a');
-                    a.href = result.video_url;
-                    a.download = 'explainer.mp4';
-                    a.click();
+                    segments.forEach((url, i) => {
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = segments.length > 1 ? `explainer_part${i + 1}.mp4` : 'explainer.mp4';
+                        a.click();
+                    });
                 };
-                card.insertBefore(dlBtn, card.querySelector('.video-scene'));
+                const dividerRef = card.querySelector('div[style*="border-top"]');
+                if (dividerRef) card.insertBefore(dlBtn, dividerRef);
+                else card.appendChild(dlBtn);
             }
             chat.scrollTop = chat.scrollHeight;
         };
-        video.src = result.video_url;
-        video.load();
+
+        loadSegment(0);
         card.appendChild(video);
+
+        // Download all segments button
+        if (segments.length > 0) {
+            const dlBtn = document.createElement('button');
+            dlBtn.className = 'interaction-option';
+            dlBtn.style.cssText = 'margin:4px 0 8px;';
+            dlBtn.textContent = segments.length > 1 ? '⬇ Download all segments' : '⬇ Download video';
+            dlBtn.onclick = () => {
+                segments.forEach((url, i) => {
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = segments.length > 1 ? `explainer_part${i + 1}.mp4` : 'explainer.mp4';
+                    a.click();
+                });
+            };
+            card.appendChild(dlBtn);
+        }
     }
 
     // ── Fallback image ──────────────────────────────────────────────────────
-    if (!result.video_url && result.image_url) {
+    if (segments.length === 0 && result.image_url) {
         const img = document.createElement('img');
         img.src = result.image_url;
         img.alt = 'Explainer visual';
@@ -761,22 +830,6 @@ function showMediaCard(result, scriptPayload) {
             a.click();
         };
         card.appendChild(dlImg);
-    }
-
-    // ── Background audio ────────────────────────────────────────────────────
-    if (result.audio_url) {
-        const audioLabel = document.createElement('div');
-        audioLabel.style.cssText = 'font-size:12px;color:#6366f1;margin:10px 0 4px;font-weight:600;';
-        audioLabel.textContent = '🎵 Background music';
-        card.appendChild(audioLabel);
-
-        const audio = document.createElement('audio');
-        audio.controls = true;
-        audio.autoplay = true;
-        audio.loop = true;
-        audio.src = result.audio_url;
-        audio.style.cssText = 'width:100%;margin-bottom:6px;';
-        card.appendChild(audio);
     }
 
     // ── Script scenes ───────────────────────────────────────────────────────

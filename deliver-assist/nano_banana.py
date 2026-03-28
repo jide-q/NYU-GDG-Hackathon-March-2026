@@ -4,9 +4,10 @@ Video generation for DeliverAssist.
 Pipeline:
     /video-script payload
         → transform_script_to_video_prompt()   (structured dict → natural-language prompt)
-        → generate_video()                      (prompt → Veo → video URL)
+        → generate_video_segments()             (parallel Veo segments → list of video URLs)
 """
 
+import asyncio
 import base64
 import logging
 import time
@@ -20,11 +21,32 @@ VEO_MODEL = "veo-3.0-fast-generate-001"
 VEO_POLL_INTERVAL = 5    # seconds between polls
 VEO_TIMEOUT = 300        # max wait time in seconds
 
-# Fallback image/audio models if Veo fails
-IMAGE_MODEL = "models/nano-banana-pro-preview"
-AUDIO_MODEL = "models/lyria-3-clip-preview"
 MAX_SCENES = 8
 MAX_DURATION_SECONDS = 75
+
+# ── Visual consistency brief (shared across all segments) ─────────────────────
+
+_CHARACTER_BRIEF = """
+CHARACTER (keep IDENTICAL across ALL segments — this is critical for continuity):
+- Friendly, warm, human-like animated presenter in their 30s
+- Casual modern clothing (dark hoodie or casual jacket), expressive face, natural hand gestures
+- Background: clean modern apartment/office with subtle city elements visible through window
+- Consistent warm-toned lighting throughout
+- Same character proportions, skin tone, and style in every scene
+"""
+
+_TEXT_STYLE = """
+TEXT LEGIBILITY (CRITICAL — phone viewers must read this easily):
+- ALL on-screen text MUST be LARGE and BOLD — minimum 48pt equivalent
+- Use WHITE or BRIGHT YELLOW text ONLY — never grey or light colors on white
+- ALWAYS place text on a SEMI-TRANSPARENT DARK background strip or pill overlay
+  (dark overlay opacity 70-80%, covering the full text width)
+- Font: clean sans-serif, heavy weight (bold/black)
+- Each text phrase stays on screen for at least 2 seconds before transitioning
+- Place text in the LOWER THIRD of frame — never at very top or extreme edges
+- Maximum 5 words per line — break long phrases across 2 lines
+- Numbers and dollar amounts: extra large, bright yellow, centered
+"""
 
 
 # ── Prompt transformer ────────────────────────────────────────────────────────
@@ -32,58 +54,49 @@ MAX_DURATION_SECONDS = 75
 def transform_script_to_video_prompt(script_payload: dict) -> str:
     """
     Convert a /video-script JSON payload into a natural-language cinematic
-    prompt suitable for Nano Banana. Enforces scene and duration limits.
-
-    Args:
-        script_payload: dict matching the /video-script response schema
-
-    Returns:
-        A plain-text prompt string (no JSON, no markdown code blocks)
+    prompt suitable for Veo. Enforces scene and duration limits.
     """
-    scenes = list(script_payload.get("scenes", []))
-    interaction_points = script_payload.get("interaction_points", [])
+    return _build_segment_prompt(
+        list(script_payload.get("scenes", [])),
+        script_payload.get("interaction_points", []),
+        segment_num=1,
+        total_segments=1,
+    )
 
-    # ── Enforce limits ──────────────────────────────────────────────────────
-    if len(scenes) > MAX_SCENES:
-        logger.warning(
-            "Script has %d scenes; truncating to %d", len(scenes), MAX_SCENES
-        )
-        scenes = scenes[:MAX_SCENES]
 
-    # Trim to MAX_DURATION_SECONDS, always keeping at least the first scene
-    total_seconds = 0
-    trimmed: list[dict] = []
-    for scene in scenes:
-        dur = int(scene.get("duration_seconds", 10))
-        if trimmed and total_seconds + dur > MAX_DURATION_SECONDS:
-            logger.warning(
-                "Dropping scene '%s' to stay within %ds limit",
-                scene.get("name", "?"),
-                MAX_DURATION_SECONDS,
-            )
-            continue
-        trimmed.append(scene)
-        total_seconds += dur
-    scenes = trimmed or scenes[:1]
+def _build_segment_prompt(
+    scenes: list[dict],
+    interaction_points: list[dict],
+    segment_num: int,
+    total_segments: int,
+) -> str:
+    """
+    Build a Veo prompt for one segment of scenes.
+    Injects character brief and text-legibility instructions.
+    """
+    # Compute total duration for this segment
+    total_seconds = sum(int(s.get("duration_seconds", 8)) for s in scenes)
+    # Clamp to Veo's 8-second clip limit per call
+    total_seconds = min(total_seconds, 8)
 
-    # ── Build prompt ────────────────────────────────────────────────────────
     lines: list[str] = [
-        "Create a short animated explainer video featuring a friendly, human-like character.",
-        "The character is empathetic, knowledgeable, and speaks naturally — like a trusted guide, not a lawyer.",
+        f"Create a short animated explainer video segment ({segment_num} of {total_segments}).",
+        "The character is empathetic, knowledgeable, and speaks naturally — like a trusted guide.",
         "",
         "VIDEO STYLE:",
         "- Clean, modern mobile-first visuals",
         "- Smooth scene transitions",
-        "- High-contrast UI-style text overlays",
         "- Preferred format: 9:16 vertical (mobile-friendly)",
-        f"- Total duration: approximately {total_seconds} seconds",
+        f"- Clip duration: approximately {total_seconds} seconds",
         "",
-        "CHARACTER BEHAVIOR:",
-        "- Use natural gestures, expressive head nods, and warm eye contact",
-        "- Show concern when explaining problems, calm reassurance when giving guidance",
-        "- Brief, natural pauses between key points",
-        "- Never robotic — always human and conversational",
-        "",
+    ]
+
+    lines += _CHARACTER_BRIEF.strip().splitlines()
+    lines.append("")
+    lines += _TEXT_STYLE.strip().splitlines()
+    lines.append("")
+
+    lines += [
         "VISUAL LANGUAGE:",
         "- 💰 Money/dollar icons for pay-related facts",
         "- ⏱ Clock icons for time and hours worked",
@@ -91,19 +104,19 @@ def transform_script_to_video_prompt(script_payload: dict) -> str:
         "- Bold highlighted text on screen for key phrases",
         "- Simple icon animations to reinforce spoken points",
         "",
-        "SCENES:",
+        "SCENES IN THIS SEGMENT:",
         "",
     ]
 
     for i, scene in enumerate(scenes, 1):
         name = scene.get("name", f"Scene {i}")
-        dur = int(scene.get("duration_seconds", 10))
+        dur = int(scene.get("duration_seconds", 8))
         dialogue = scene.get("dialogue", "").strip()
         visual = scene.get("visual_direction", "").strip()
         onscreen = scene.get("onscreen_text", [])
         icons = scene.get("icons", [])
 
-        lines.append(f"Scene {i} — {name} ({dur} seconds):")
+        lines.append(f"Scene {i} — {name} ({dur}s):")
 
         if dialogue:
             lines.append(f'  Character says: "{dialogue}"')
@@ -113,22 +126,21 @@ def transform_script_to_video_prompt(script_payload: dict) -> str:
 
         if onscreen:
             formatted = ", ".join(f'"{t}"' for t in onscreen)
-            lines.append(f"  On-screen text highlights: {formatted}")
+            lines.append(f"  On-screen text (LARGE BOLD with dark overlay): {formatted}")
 
         if icons:
             lines.append(f"  Icons and visual aids: {' '.join(str(ic) for ic in icons)}")
 
         lines.append("")
 
-    # ── Interaction points (rendered as UI overlays) ────────────────────────
-    if interaction_points:
-        lines.append("INTERACTIVE UI OVERLAYS (render as tappable card elements):")
+    # Interaction points only in final segment
+    if interaction_points and segment_num == total_segments:
+        lines.append("INTERACTIVE UI OVERLAYS (render as tappable card elements at end):")
         lines.append("")
         for ip in interaction_points:
             after = ip.get("after_scene")
             prompt_text = ip.get("prompt", "").strip()
             options = ip.get("options", [])
-
             if after is not None:
                 lines.append(f"  After Scene {after}:")
             if prompt_text:
@@ -138,19 +150,19 @@ def transform_script_to_video_prompt(script_payload: dict) -> str:
             lines.append("")
 
     lines += [
-        "END OF SCRIPT.",
-        "Render the full video as described above. Maintain consistent character design across all scenes.",
+        "END OF SEGMENT.",
+        "Render this segment as described. Maintain consistent character design throughout.",
     ]
 
     return "\n".join(lines)
 
 
-# ── Nano Banana API call ──────────────────────────────────────────────────────
+# ── Veo core (synchronous) ────────────────────────────────────────────────────
 
 def _generate_veo_video(client: genai.Client, prompt: str) -> str | None:
     """
-    Generate a video using Veo. Polls until the operation completes or times out.
-    Returns a video URI/URL string, or None on failure.
+    Generate a single 8-second Veo clip. Polls until done or timeout.
+    Returns a data: URI string, or None on failure.
     """
     logger.info("[Veo] Starting generation with %s", VEO_MODEL)
 
@@ -180,7 +192,6 @@ def _generate_veo_video(client: genai.Client, prompt: str) -> str | None:
     video = operation.response.generated_videos[0].video
     logger.info("[Veo] Done — downloading via SDK")
 
-    # Download video bytes using the SDK (handles API key auth internally).
     try:
         video_bytes = client.files.download(file=video)
         b64 = base64.b64encode(video_bytes).decode()
@@ -191,64 +202,99 @@ def _generate_veo_video(client: genai.Client, prompt: str) -> str | None:
         return None
 
 
-def _extract_inline(response, default_mime: str) -> tuple[str | None, str | None]:
+async def _generate_veo_segment_async(client: genai.Client, prompt: str) -> str | None:
+    """Run the synchronous Veo call in a thread so it doesn't block the event loop."""
+    return await asyncio.to_thread(_generate_veo_video, client, prompt)
+
+
+# ── Multi-segment generation (public API) ────────────────────────────────────
+
+async def generate_video_segments(client: genai.Client, script_payload: dict) -> dict:
     """
-    Extract the first inline data or file URI from a generate_content response.
-    Returns (data_url_or_uri, mime_type) or (None, None).
-    """
-    for candidate in response.candidates or []:
-        content = getattr(candidate, "content", None)
-        if not content:
-            continue
-        for part in content.parts or []:
-            file_data = getattr(part, "file_data", None)
-            if file_data and getattr(file_data, "file_uri", None):
-                return file_data.file_uri, default_mime
-
-            inline = getattr(part, "inline_data", None)
-            if inline and getattr(inline, "data", None):
-                mime = getattr(inline, "mime_type", None) or default_mime
-                b64 = base64.b64encode(inline.data).decode()
-                return f"data:{mime};base64,{b64}", mime
-
-            text = getattr(part, "text", None)
-            if text and text.strip().startswith("http"):
-                return text.strip(), default_mime
-
-    return None, None
-
-
-def generate_video(client: genai.Client, prompt: str) -> dict:
-    """
-    Generate a video using Veo. Falls back to image + audio if Veo fails.
+    Split the script into two halves and generate both segments in parallel.
+    Each segment is an 8-second Veo clip; together they cover the full script.
 
     Returns:
         {
-            "video_url":  str | None,   # Veo URI when successful
-            "image_url":  str | None,   # nano-banana fallback
-            "audio_url":  str | None,   # lyria fallback
-            "media_type": str | None,
-            "status": "success",
+            "segments":   [dataUrl, dataUrl],   # both clips as data: URIs
+            "video_url":  dataUrl | None,        # first segment (for backwards compat)
+            "image_url":  None,
+            "audio_url":  None,
+            "media_type": "video/mp4" | None,
+            "status":     "success",
         }
     """
-    # ── Try Veo first ───────────────────────────────────────────────────────
-    try:
-        video_uri = _generate_veo_video(client, prompt)
-        if video_uri:
-            return {
-                "video_url": video_uri,
-                "image_url": None,
-                "audio_url": None,
-                "media_type": "video/mp4",
-                "status": "success",
-            }
-        logger.warning("[Veo] No URI returned, falling back to image+audio")
-    except Exception as e:
-        logger.warning("[Veo] Failed (%s), falling back to image+audio", e)
+    scenes = list(script_payload.get("scenes", []))
+    interaction_points = script_payload.get("interaction_points", [])
 
-    # Veo failed — return empty so the frontend shows the script card
-    logger.warning("[Veo] Failed, frontend will show script card fallback")
+    # Enforce hard scene cap
+    if len(scenes) > MAX_SCENES:
+        scenes = scenes[:MAX_SCENES]
+
+    # Split scenes in half for two segments
+    mid = max(1, len(scenes) // 2)
+    groups = [scenes[:mid], scenes[mid:]] if len(scenes) > 1 else [scenes, []]
+    groups = [g for g in groups if g]  # drop empty second group if only 1 scene
+
+    total_segments = len(groups)
+    prompts = [
+        _build_segment_prompt(group, interaction_points, i + 1, total_segments)
+        for i, group in enumerate(groups)
+    ]
+
+    logger.info("[Veo] Generating %d segment(s) sequentially", total_segments)
+
+    # Generate segments sequentially to avoid rate-limit failures on parallel calls
+    segments: list[str] = []
+    for i, p in enumerate(prompts):
+        try:
+            url = await _generate_veo_segment_async(client, p)
+            if url:
+                segments.append(url)
+                logger.info("[Veo] Segment %d/%d done (%d bytes b64)", i + 1, total_segments, len(url))
+            else:
+                logger.warning("[Veo] Segment %d/%d returned None", i + 1, total_segments)
+        except Exception as exc:
+            logger.warning("[Veo] Segment %d/%d failed: %s", i + 1, total_segments, exc)
+
+    if not segments:
+        logger.warning("[Veo] All segments failed — frontend will show script card")
+        return {
+            "segments": [],
+            "video_url": None,
+            "image_url": None,
+            "audio_url": None,
+            "media_type": None,
+            "status": "success",
+        }
+
+    logger.info("[Veo] %d/%d segments generated successfully", len(segments), total_segments)
     return {
+        "segments": segments,
+        "video_url": segments[0],
+        "image_url": None,
+        "audio_url": None,
+        "media_type": "video/mp4",
+        "status": "success",
+    }
+
+
+# ── Legacy sync wrapper (kept for backwards compat) ───────────────────────────
+
+def generate_video(client: genai.Client, prompt: str) -> dict:
+    """Synchronous single-segment wrapper. Use generate_video_segments() instead."""
+    video_uri = _generate_veo_video(client, prompt)
+    if video_uri:
+        return {
+            "segments": [video_uri],
+            "video_url": video_uri,
+            "image_url": None,
+            "audio_url": None,
+            "media_type": "video/mp4",
+            "status": "success",
+        }
+    return {
+        "segments": [],
         "video_url": None,
         "image_url": None,
         "audio_url": None,

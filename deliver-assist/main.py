@@ -25,7 +25,7 @@ from system_prompt import build_system_prompt
 from tools import TOOL_DECLARATIONS, handle_tool_call
 from data_loader import load_data_context
 from video_script import generate_video_script
-from nano_banana import transform_script_to_video_prompt, generate_video as nb_generate_video
+from nano_banana import transform_script_to_video_prompt, generate_video_segments
 
 load_dotenv()
 
@@ -283,21 +283,21 @@ class GenerateVideoRequest(BaseModel):
 @app.post("/generate-video")
 async def generate_video_endpoint(req: GenerateVideoRequest, debug: bool = False):
     """
-    Transform a /video-script payload into a Nano Banana prompt and generate a video.
+    Generate multi-segment video from a /video-script payload.
+    Splits scenes into two 8-second Veo clips generated in parallel.
 
     Query params:
-        debug=true  — return the generated prompt without calling the model
+        debug=true  — return the built prompt without calling Veo
     """
     try:
-        prompt = transform_script_to_video_prompt(req.script_payload)
-        logger.info("[/generate-video] Prompt built (%d chars)", len(prompt))
-
         if debug:
+            prompt = transform_script_to_video_prompt(req.script_payload)
+            logger.info("[/generate-video] Debug prompt built (%d chars)", len(prompt))
             return {"status": "debug", "prompt": prompt}
 
-        result = nb_generate_video(client, prompt)
-        if result.get("video_url"):
-            logger.info("[/generate-video] video_url: %s", result["video_url"][:120])
+        result = await generate_video_segments(client, req.script_payload)
+        n = len(result.get("segments", []))
+        logger.info("[/generate-video] %d segment(s) generated", n)
         return result
 
     except Exception as exc:
