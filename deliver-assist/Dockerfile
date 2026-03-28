@@ -14,3 +14,8 @@ ENV PORT=8080
 EXPOSE 8080
 
 CMD ["python", "main.py"]
+
+# Prevents Python from writing .pyc files
+ENV PYTHONDONTWRITEBYTECODE=1
+# Ensures logs are sent straight to the terminal (and GCP logs)
+ENV PYTHONUNBUFFERED=1
