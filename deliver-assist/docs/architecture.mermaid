@@ -1,0 +1,43 @@
+---
+title: DeliverAssist Architecture
+---
+graph TB
+    subgraph User["👤 Delivery Worker (Phone/Laptop)"]
+        MIC["🎙 Microphone<br/>PCM 16kHz"]
+        CAM["📷 Camera<br/>JPEG frames"]
+        UI["📱 Browser UI<br/>HTML/JS"]
+        SPEAK["🔊 Speaker<br/>Audio playback"]
+    end
+
+    subgraph CloudRun["☁️ Google Cloud Run"]
+        WS["WebSocket Proxy<br/>(FastAPI)"]
+        SP["System Prompt<br/>Worker Rights KB<br/>+ DCWP Data"]
+        TH["Tool Handler<br/>Pay Calculator"]
+    end
+
+    subgraph Gemini["🤖 Gemini 2.5 Flash Native Audio"]
+        LIVE["Live API<br/>Bidi Streaming"]
+        LANG["Language Detection<br/>70+ languages"]
+        VISION["Image Understanding<br/>Pay Stub OCR"]
+        FC["Function Calling<br/>Pay Compliance Check"]
+    end
+
+    subgraph Data["📊 NYC Open Data (DCWP)"]
+        SURVEY["Worker Survey<br/>7,956 responses"]
+        QUARTERLY["Quarterly Tables<br/>Platform earnings"]
+        RIGHTS["Worker Rights<br/>NYC Admin Code §20-1522"]
+    end
+
+    MIC -->|audio stream| WS
+    CAM -->|JPEG| WS
+    WS <-->|bidi audio + tool calls| LIVE
+    LIVE --> LANG
+    LIVE --> VISION
+    LIVE --> FC
+    FC -->|invoke| TH
+    TH -->|result| FC
+    SP -.->|injected at session start| LIVE
+    Data -.->|loaded into prompt| SP
+    LIVE -->|audio response| WS
+    WS -->|audio| SPEAK
+    WS -->|transcripts| UI

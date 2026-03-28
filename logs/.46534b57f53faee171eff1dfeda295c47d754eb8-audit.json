@@ -1,0 +1,15 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 14
+    },
+    "auditLog": "/Users/hamidouwb/Downloads/hackathon GDG/logs/.46534b57f53faee171eff1dfeda295c47d754eb8-audit.json",
+    "files": [
+        {
+            "date": 1774708444688,
+            "name": "/Users/hamidouwb/Downloads/hackathon GDG/logs/error-2026-03-28.log",
+            "hash": "642558ea41d086e3817cdc93a548e8b6532a0b5ff89679e95a9c193344290d10"
+        }
+    ],
+    "hashType": "sha256"
+}
